@@ -4836,6 +4836,21 @@ INT WINAPI WSAIoctl(SOCKET s, DWORD code, LPVOID in_buff, DWORD in_size, LPVOID 
            break;
        }
 
+   case WS_SIO_ADDRESS_LIST_CHANGE:
+   {
+       BOOL is_blocking;
+       HANDLE handle;
+
+       TRACE("-> SIO_ADDRESS_LIST_CHANGE request\n");
+
+       if (overlapped || (_is_blocking( s, &is_blocking ) && is_blocking))
+           status = NotifyAddrChange( &handle, overlapped );
+       else
+           status = WSAEWOULDBLOCK;
+       overlapped = NULL; /* managed by NotifyAddrChange */
+       break;
+   }
+
    case WS_SIO_ADDRESS_LIST_QUERY:
    {
         DWORD size;

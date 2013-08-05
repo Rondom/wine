@@ -9457,6 +9457,75 @@ todo_wine
     closesocket(sock3);
 }
 
+static void test_sioAddressListChange2(void)
+{
+    struct sockaddr_in bindAddress;
+    struct in_addr net_address;
+    WSAOVERLAPPED overlapped;
+    struct hostent *h;
+    DWORD num_bytes;
+    SOCKET sock;
+    int acount;
+    int ret;
+
+    if (!winetest_interactive)
+    {
+        skip("Cannot test SIO_ADDRESS_LIST_CHANGE, interactive tests must be enabled\n");
+        return;
+    }
+
+    /* Use gethostbyname to find the list of local network interfaces */
+    h = gethostbyname("");
+    if (!h)
+    {
+        skip("Cannot test SIO_ADDRESS_LIST_CHANGE, gethostbyname failed with %u\n",
+             WSAGetLastError());
+        return;
+    }
+    for (acount = 0; h->h_addr_list[acount]; acount++);
+    if (acount < 2)
+    {
+        skip("Cannot test SIO_ADDRESS_LIST_CHANGE, test requires at least two network cards.\n");
+        return;
+    }
+    net_address.s_addr = *(ULONG *) h->h_addr_list[0];
+
+    /* Bind an overlapped socket to the first found network interface */
+    sock = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    ok(sock != INVALID_SOCKET, "Expected socket to return a valid socket\n");
+    if (sock == INVALID_SOCKET)
+    {
+        skip("Cannot test SIO_ADDRESS_LIST_CHANGE, socket creation failed with %u\n",
+             WSAGetLastError());
+        return;
+    }
+    memset(&bindAddress, 0, sizeof(bindAddress));
+    bindAddress.sin_family = AF_INET;
+    bindAddress.sin_addr.s_addr = net_address.s_addr;
+    ret = bind(sock, (struct sockaddr*)&bindAddress, sizeof(bindAddress));
+    if (ret != 0)
+    {
+        skip("Cannot test SIO_ADDRESS_LIST_CHANGE, failed to bind, error %u\n", WSAGetLastError());
+        goto end;
+    }
+
+    /* Wait for address changes, request that the user change one of the other interfaces */
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    ret = WSAIoctl(sock, SIO_ADDRESS_LIST_CHANGE, NULL, 0, NULL, 0, &num_bytes, &overlapped, NULL);
+    ok(ret == SOCKET_ERROR, "WSAIoctl succeeded unexpectedly\n");
+    ok(WSAGetLastError() == WSA_IO_PENDING, "Expected pending last error %d\n", WSAGetLastError());
+    trace("Testing socket-based ipv4 address list change notification. Please connect/disconnect or"
+          " change the ipv4 address of any of the local network interfaces EXCEPT for the one"
+          " attached to %s (10 second timeout).\n",
+          inet_ntoa(net_address));
+    ret = WaitForSingleObject(overlapped.hEvent, 10000);
+    todo_wine ok(ret == WAIT_OBJECT_0, "failed to get overlapped event %u\n", ret);
+
+end:
+    closesocket(sock);
+}
+
 static void test_synchronous_WSAIoctl(void)
 {
     HANDLE previous_port, io_port;

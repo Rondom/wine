@@ -9520,7 +9520,7 @@ static void test_sioAddressListChange2(void)
           " attached to %s (10 second timeout).\n",
           inet_ntoa(net_address));
     ret = WaitForSingleObject(overlapped.hEvent, 10000);
-    todo_wine ok(ret == WAIT_OBJECT_0, "failed to get overlapped event %u\n", ret);
+    ok(ret == WAIT_OBJECT_0, "failed to get overlapped event %u\n", ret);
 
 end:
     closesocket(sock);

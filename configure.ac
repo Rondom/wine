@@ -457,7 +457,9 @@ AC_CHECK_HEADERS(\
 	linux/ioctl.h \
 	linux/joystick.h \
 	linux/major.h \
+	linux/netlink.h \
 	linux/param.h \
+	linux/rtnetlink.h \
 	linux/serial.h \
 	linux/types.h \
 	linux/ucdrom.h \

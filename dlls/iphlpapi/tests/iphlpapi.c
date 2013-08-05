@@ -35,6 +35,8 @@
  */
 
 #include <stdarg.h>
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
 #include "winsock2.h"
 #include "windef.h"
 #include "winbase.h"
@@ -1340,7 +1342,7 @@ static void testNotifyAddrChange(void)
     ret = GetLastError();
     todo_wine ok(ret == ERROR_IO_PENDING, "GetLastError returned %d, expected ERROR_IO_PENDING\n", ret);
     success = pCancelIPChangeNotify(&overlapped);
-    todo_wine ok(success == TRUE, "CancelIPChangeNotify returned FALSE, expected TRUE\n");
+    ok(success == TRUE, "CancelIPChangeNotify returned FALSE, expected TRUE\n");
 
     ZeroMemory(&overlapped, sizeof(overlapped));
     success = pCancelIPChangeNotify(&overlapped);
@@ -1357,7 +1359,14 @@ static void testNotifyAddrChange(void)
     ret = GetLastError();
     ok(ret == ERROR_IO_INCOMPLETE, "GetLastError returned %d, expected ERROR_IO_INCOMPLETE\n", ret);
     success = pCancelIPChangeNotify(&overlapped);
-    todo_wine ok(success == TRUE, "CancelIPChangeNotify returned FALSE, expected TRUE\n");
+    ok(success == TRUE, "CancelIPChangeNotify returned FALSE, expected TRUE\n");
+    ok((NTSTATUS)overlapped.Internal == STATUS_CANCELLED,
+       "Overlapped IO returned %x, expected %x\n", (NTSTATUS)overlapped.Internal, STATUS_CANCELLED);
+    success = GetOverlappedResult(handle, &overlapped, &bytes, FALSE);
+    ok(success == FALSE, "GetOverlappedResult returned TRUE, expected FALSE\n");
+    ret = GetLastError();
+    ok(ret == ERROR_OPERATION_ABORTED,
+       "GetLastError returned %d, expected ERROR_OPERATION_ABORTED\n", ret);
 
     if (winetest_interactive)
     {

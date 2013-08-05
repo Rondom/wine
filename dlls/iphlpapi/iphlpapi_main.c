@@ -218,8 +218,15 @@ DWORD WINAPI AllocateAndGetIpAddrTableFromStack(PMIB_IPADDRTABLE *ppIpAddrTable,
  */
 BOOL WINAPI CancelIPChangeNotify(LPOVERLAPPED overlapped)
 {
-  FIXME("(overlapped %p): stub\n", overlapped);
-  return FALSE;
+    IO_STATUS_BLOCK *iosb = (IO_STATUS_BLOCK *) overlapped;
+    HANDLE handle;
+
+    TRACE("(overlapped %p)\n", overlapped);
+
+    if (!iosb || iosb->u.Status != STATUS_PENDING)
+        return FALSE;
+    handle = (HANDLE) overlapped->u.Pointer;
+    return CloseHandle( handle );
 }
 
 
@@ -2832,9 +2839,15 @@ static NTSTATUS IPHLPAPI_apc_NotifyAddrChange(void *arg, IO_STATUS_BLOCK *iosb, 
     LPOVERLAPPED overlapped = (LPOVERLAPPED) iosb;
     HANDLE h = (HANDLE) arg;
 
+    if (status == STATUS_HANDLES_CLOSED)
+    {
+        status = STATUS_CANCELLED;
+        goto done;
+    }
     if (status != STATUS_ALERTED)
         return status;
     status = IPHLPAPI_monitorifchange( h );
+done:
     if (iosb)
     {
         iosb->u.Status = status;
@@ -2901,6 +2914,8 @@ DWORD WINAPI NotifyAddrChange(PHANDLE handle, LPOVERLAPPED overlapped)
         status = wine_server_call( req );
     }
     SERVER_END_REQ;
+    if (status == STATUS_PENDING)
+        overlapped->u.Pointer = h;
 
 done:
     if (iosb) iosb->u.Status = status;

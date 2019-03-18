@@ -4843,7 +4843,7 @@ INT WINAPI WSAIoctl(SOCKET s, DWORD code, LPVOID in_buff, DWORD in_size, LPVOID 
 
        TRACE("-> SIO_ADDRESS_LIST_CHANGE request\n");
 
-       if (overlapped || (_is_blocking( s, &is_blocking ) && is_blocking))
+       if (overlapped || (sock_is_blocking( s, &is_blocking ) && is_blocking))
            status = NotifyAddrChange( &handle, overlapped );
        else
            status = WSAEWOULDBLOCK;

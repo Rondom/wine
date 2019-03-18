@@ -2139,23 +2139,155 @@ BOOL WINAPI DeleteVolumeMountPointW(LPCWSTR mountpoint)
 }
 
 /***********************************************************************
- *           SetVolumeMountPointA (KERNEL32.@)
- */
-BOOL WINAPI SetVolumeMountPointA(LPCSTR path, LPCSTR volume)
-{
-    FIXME("(%s, %s), stub!\n", debugstr_a(path), debugstr_a(volume));
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
-}
-
-/***********************************************************************
  *           SetVolumeMountPointW (KERNEL32.@)
  */
 BOOL WINAPI SetVolumeMountPointW(LPCWSTR path, LPCWSTR volume)
 {
-    FIXME("(%s, %s), stub!\n", debugstr_w(path), debugstr_w(volume));
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    const WCHAR prefixW[] = {'\\','D','o','s','D','e','v','i','c','e','s','\\'};
+    LPWSTR namesW = NULL;
+    DWORD buffer = MAX_PATH;
+    HANDLE mgr;
+    BOOL ret = FALSE;
+
+    /* This struct is a better integration of MOUNTMGR_CREATE_POINT_INPUT   */
+    /* Maybe DeviceName[14] must become adapted for mounted folders support */
+    struct
+    {
+        USHORT DeviceNameOffset;
+        USHORT DeviceNameLength;
+        USHORT VolumeNameOffset;
+        USHORT VolumeNameLength;
+        WCHAR  DeviceName[15];   /* 14 WCHARs: prefixW + 2 + null-terminator */
+        WCHAR  VolumeName[49];   /* without trailing '\' + null-terminator   */
+    } input;
+
+    TRACE("(%s, %s)\n", debugstr_w(path), debugstr_w(volume));
+
+    /* Clear input */
+    memset(&input, 0, sizeof(input));
+
+    /* Now prefill with always needed consts */
+    #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+    input.DeviceNameOffset = (int)&input.DeviceName - (int)&input;
+    input.DeviceNameLength = ARRAY_SIZE(input.DeviceName) - 1;
+    input.VolumeNameOffset = (int)&input.VolumeName - (int)&input;
+    input.VolumeNameLength = ARRAY_SIZE(input.VolumeName) - 1;
+
+    /* Begin with initial checks */
+    if (!path || !volume)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* Abort if path has been mounted */
+    if (GetVolumeNameForVolumeMountPointW(path, namesW, MAX_PATH))
+    {
+        FIXME("%s already mounts %s\n", debugstr_w(path), debugstr_w(namesW));
+        SetLastError(ERROR_DIR_NOT_EMPTY);
+        return FALSE;
+    }
+
+    /* We can use checks and error codes from GetVolumeNameForVolumeMountPointW */
+    switch (GetLastError())
+    {
+        case ERROR_INVALID_NAME:
+        case ERROR_FILENAME_EXCED_RANGE:
+            return FALSE;
+        default:
+            break;
+    }
+
+    /* Check whether volume name is valid */
+    if (!wine_PWSTR_IS_VOLUME_NAME(volume))
+    {
+        WARN("(%s, %s), invalid volume name!\n", debugstr_w(path), debugstr_w(volume));
+        SetLastError(ERROR_INVALID_NAME);
+        return FALSE;
+    }
+
+    /* Abort if volume has been mounted */
+    if (GetVolumePathNamesForVolumeNameW(volume, namesW, buffer, &buffer))
+    {
+        WARN("%s is already mounted by %s\n", debugstr_w(volume), debugstr_w(namesW));
+        SetLastError(ERROR_VOLUME_MOUNTED);
+        return FALSE;
+    }
+
+    if(strlenW(path) == 3 && path[1] == L':')
+    {
+        /* Fill input with SymlinkName */
+        memcpy(input.DeviceName, prefixW, sizeof(input.DeviceName) - sizeof(WCHAR));
+        input.DeviceName[12] = toupperW(path[0]);  /* Drive letter */
+        input.DeviceName[13] = L':';
+
+        /* Now fill the VolumeName and make sure the 2nd WCHAR is '?' */
+        memcpy(input.VolumeName, volume, sizeof(input.VolumeName) - sizeof(WCHAR));
+        input.VolumeName[1] = L'?';
+
+        /* Create the handle */
+        mgr = CreateFileW(MOUNTMGR_DOS_DEVICE_NAME,
+                          GENERIC_READ | GENERIC_WRITE,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          0,
+                          OPEN_EXISTING,
+                          FILE_ATTRIBUTE_NORMAL,
+                          NULL);
+
+        if (mgr == INVALID_HANDLE_VALUE)
+        {
+            WARN("Handle could not be created\n");
+            return FALSE;
+        }
+
+        /* MountManager should now be able to create the VolumeMountPoint */
+        ret = DeviceIoControl(mgr, IOCTL_MOUNTMGR_CREATE_POINT, &input, sizeof(input), 0, 0, 0, 0);
+
+        CloseHandle(mgr);
+    }
+    else
+    {
+        FIXME("Mounting folders are not yet supported\n");
+    }
+
+    return ret;
+}
+
+/***********************************************************************
+ *           SetVolumeMountPointA (KERNEL32.@)
+ */
+BOOL WINAPI SetVolumeMountPointA(LPCSTR path, LPCSTR volume)
+{
+    BOOL ret = FALSE;
+    WCHAR *pathW, *volumeW;
+
+    TRACE("(%s, %s)\n", debugstr_a(path), debugstr_a(volume));
+
+    if (!path || !volume)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!(pathW = FILE_name_AtoW(path, TRUE)))
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    if (!(volumeW = FILE_name_AtoW(volume, TRUE)))
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        goto free_pathW;
+    }
+
+    ret = SetVolumeMountPointW(pathW, volumeW);
+
+    HeapFree(GetProcessHeap(), 0, volumeW);
+free_pathW:
+    HeapFree(GetProcessHeap(), 0, pathW);
+
+    return ret;
 }
 
 /***********************************************************************

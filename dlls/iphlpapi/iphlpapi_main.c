@@ -19,6 +19,7 @@
  */
 
 #include "config.h"
+#include "wine/port.h"
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -2778,22 +2779,20 @@ static NTSTATUS IPHLPAPI_createmonitorhandle(HANDLE *h)
 static NTSTATUS IPHLPAPI_initmonitorhandle(HANDLE h)
 {
     NTSTATUS status = ERROR_NOT_SUPPORTED;
-    int fd = -1;
+#if defined(NETLINK_ROUTE)
+    int fd;
+    struct sockaddr_nl addr;
 
     status = wine_server_handle_to_fd( h, FILE_READ_DATA, &fd, NULL );
-    if (status == STATUS_SUCCESS)
-    {
-#if defined(NETLINK_ROUTE)
-        struct sockaddr_nl addr;
-
-        memset( &addr, 0, sizeof(addr) );
-        addr.nl_family = AF_NETLINK;
-        addr.nl_groups = RTMGRP_IPV4_IFADDR;
-        if (bind( fd, (struct sockaddr *)&addr, sizeof(addr) ) == -1)
-            status = ERROR_NOT_SUPPORTED;
-#endif
-    }
+    if (status != STATUS_SUCCESS)
+        return status;
+    memset( &addr, 0, sizeof(addr) );
+    addr.nl_family = AF_NETLINK;
+    addr.nl_groups = RTMGRP_IPV4_IFADDR;
+    if (bind( fd, (struct sockaddr *)&addr, sizeof(addr) ) == -1)
+        status = ERROR_NOT_SUPPORTED;
     wine_server_release_fd( h, fd );
+#endif
     return status;
 }
 
@@ -2806,26 +2805,94 @@ static NTSTATUS IPHLPAPI_initmonitorhandle(HANDLE h)
 static NTSTATUS IPHLPAPI_monitorifchange(HANDLE h)
 {
     NTSTATUS status = ERROR_NOT_SUPPORTED;
+#if defined(NETLINK_ROUTE)
     char buffer[4096];
-    int fd = -1;
-    size_t len;
+    int fd;
+    int len;
+    struct iovec iov;
+    struct sockaddr_nl sa;
+    struct msghdr msg;
+    struct nlmsghdr *nlh;
 
     status = wine_server_handle_to_fd( h, FILE_READ_DATA, &fd, NULL );
     if (status != STATUS_SUCCESS)
         return status;
     status = STATUS_PENDING;
-    if ((len = recv( fd, buffer, sizeof(buffer), 0 )) != 0)
+    iov = (struct iovec) { buffer, sizeof(buffer) };
+    msg = (struct msghdr) { &sa, sizeof(sa), &iov, 1, NULL, 0, 0 };
+    if ((len = recvmsg(fd, &msg, 0)) != 0)
     {
-#if defined(NETLINK_ROUTE)
-        struct nlmsghdr *nlh;
-
-        nlh = (struct nlmsghdr*) buffer;
-        if (NLMSG_OK(nlh, len) && (nlh->nlmsg_type == RTM_NEWADDR || nlh->nlmsg_type == RTM_DELADDR))
-            status = STATUS_SUCCESS;
-#endif
+        for (nlh = (struct nlmsghdr *) buffer; NLMSG_OK(nlh, len); nlh = NLMSG_NEXT(nlh, len))
+        {
+            if (nlh->nlmsg_type == NLMSG_DONE)
+                break;
+            if (nlh->nlmsg_type == RTM_NEWADDR || nlh->nlmsg_type == RTM_DELADDR)
+                status = STATUS_SUCCESS;
+            if (nlh->nlmsg_type == NLMSG_ERROR)
+            {
+                /* Do some error handling? */
+            }
+        }
     }
     wine_server_release_fd( h, fd );
+#endif
     return status;
+}
+
+
+typedef NTSTATUS async_callback_t( void *user, IO_STATUS_BLOCK *io, NTSTATUS status );
+
+struct ip_async_io
+{
+    async_callback_t   *callback; /* must be the first field */
+    struct ip_async_io *next;
+    HANDLE              handle;
+};
+
+static struct ip_async_io *ipio_freelist;
+
+static void release_ipio( struct ip_async_io *io )
+{
+    for (;;)
+    {
+        struct ip_async_io *next = ipio_freelist;
+        io->next = next;
+        if (interlocked_cmpxchg_ptr( (void **)&ipio_freelist, io, next ) == next) return;
+    }
+}
+
+static struct ip_async_io *alloc_ipio( DWORD size, async_callback_t callback, HANDLE handle )
+{
+    /* first free remaining previous fileinfos */
+
+    struct ip_async_io *io = interlocked_xchg_ptr( (void **)&ipio_freelist, NULL );
+
+    while (io)
+    {
+        struct ip_async_io *next = io->next;
+        RtlFreeHeap( GetProcessHeap(), 0, io );
+        io = next;
+    }
+
+    if ((io = RtlAllocateHeap( GetProcessHeap(), 0, size )))
+    {
+        io->callback = callback;
+        io->handle   = handle;
+    }
+    return io;
+}
+
+static async_data_t server_async( HANDLE handle, struct ip_async_io *user, HANDLE event,
+                                  PIO_APC_ROUTINE apc, void *apc_context, IO_STATUS_BLOCK *io )
+{
+    async_data_t async;
+    async.handle      = wine_server_obj_handle( handle );
+    async.user        = wine_server_client_ptr( user );
+    async.iosb        = wine_server_client_ptr( io );
+    async.event       = wine_server_obj_handle( event );
+    async.apc         = wine_server_client_ptr( apc );
+    async.apc_context = wine_server_client_ptr( apc_context );
+    return async;
 }
 
 
@@ -2834,10 +2901,10 @@ static NTSTATUS IPHLPAPI_monitorifchange(HANDLE h)
  * 
  * APC for handling NotifyAddrChange requests.
  */
-static NTSTATUS IPHLPAPI_apc_NotifyAddrChange(void *arg, IO_STATUS_BLOCK *iosb, NTSTATUS status, void **apc)
+static NTSTATUS IPHLPAPI_apc_NotifyAddrChange( void *user, IO_STATUS_BLOCK *iosb, NTSTATUS status )
 {
     LPOVERLAPPED overlapped = (LPOVERLAPPED) iosb;
-    HANDLE h = (HANDLE) arg;
+    struct ip_async_io *io = (struct ip_async_io *) user;
 
     if (status == STATUS_HANDLES_CLOSED)
     {
@@ -2846,13 +2913,17 @@ static NTSTATUS IPHLPAPI_apc_NotifyAddrChange(void *arg, IO_STATUS_BLOCK *iosb, 
     }
     if (status != STATUS_ALERTED)
         return status;
-    status = IPHLPAPI_monitorifchange( h );
+    status = IPHLPAPI_monitorifchange( io->handle );
+    if (status != STATUS_PENDING)
+    {
+        release_ipio( io );
+    }
 done:
     if (iosb)
     {
         iosb->u.Status = status;
-        if (overlapped->hEvent)
-            SetEvent( overlapped->hEvent );
+        /*if (overlapped->hEvent)
+            SetEvent( overlapped->hEvent );*/
     }
     return status;
 }
@@ -2870,17 +2941,15 @@ done:
  * RETURNS
  *  Success: NO_ERROR
  *  Failure: error code from winerror.h
- *
- * FIXME
- *  Stub, returns ERROR_NOT_SUPPORTED.
  */
 DWORD WINAPI NotifyAddrChange(PHANDLE handle, LPOVERLAPPED overlapped)
 {
+    struct ip_async_io *ipio;
     IO_STATUS_BLOCK *iosb = (IO_STATUS_BLOCK *) overlapped;
     NTSTATUS status;
     HANDLE h;
 
-    TRACE("(handle %p, overlapped %p): stub\n", handle, overlapped);
+    TRACE("(handle %p, overlapped %p): func\n", handle, overlapped);
 
     status = IPHLPAPI_createmonitorhandle( &h );
     if (status != STATUS_SUCCESS)
@@ -2904,13 +2973,12 @@ DWORD WINAPI NotifyAddrChange(PHANDLE handle, LPOVERLAPPED overlapped)
     }
     /* for overlapped operation wait for the server to inform us that it's time to read data */
     *handle = h;
+    if (!(ipio = (struct ip_async_io *)alloc_ipio( sizeof(*ipio), IPHLPAPI_apc_NotifyAddrChange, h )))
+        return STATUS_NO_MEMORY;
     SERVER_START_REQ( register_async )
     {
-        req->type           = ASYNC_TYPE_READ;
-        req->async.handle   = wine_server_obj_handle( h );
-        req->async.callback = wine_server_client_ptr( IPHLPAPI_apc_NotifyAddrChange );
-        req->async.iosb     = wine_server_client_ptr( iosb );
-        req->async.arg      = wine_server_client_ptr( h );
+        req->type  = ASYNC_TYPE_READ;
+        req->async = server_async( h, ipio, overlapped->hEvent, NULL, NULL, iosb );
         status = wine_server_call( req );
     }
     SERVER_END_REQ;

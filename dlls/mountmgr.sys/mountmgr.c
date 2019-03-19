@@ -88,6 +88,62 @@ static struct mount_point *add_mount_point( DEVICE_OBJECT *device, UNICODE_STRIN
     return mount;
 }
 
+/* taken from device.c, o well */
+static char *get_device_path( char *device )
+{
+    const char *config_dir = wine_get_config_dir();
+    size_t len = strlen(config_dir) + sizeof("/drive_") + sizeof(char);
+    char *path = HeapAlloc( GetProcessHeap(), 0, len );
+    if (path)
+    {
+        strcpy( path, config_dir );
+        strcat( path, "/drive_" );
+        strcat( path, device );
+    }
+    return path;
+}
+
+/* implementation of IOCTL_MOUNTMGR_CREATE_POINT */
+static NTSTATUS create_mount_point( DEVICE_OBJECT *device, void *buff, SIZE_T insize,
+                                    SIZE_T outsize, IO_STATUS_BLOCK *iosb )
+{
+    MOUNTMGR_CREATE_POINT_INPUT *input = buff;
+    UNICODE_STRING device_nameW;
+    struct mount_point *mount;
+    char* unix_mount;
+    char drive[2];
+
+    drive[1] = '\0';
+
+    /* sanity checks */
+    if (input->SymbolicLinkNameOffset + input->SymbolicLinkNameLength * sizeof(WCHAR) > insize ||
+        input->DeviceNameOffset + input->DeviceNameLength * sizeof(WCHAR) > insize ||
+        input->SymbolicLinkNameOffset + input->SymbolicLinkNameLength * sizeof(WCHAR) < input->SymbolicLinkNameOffset ||
+        input->DeviceNameOffset + input->DeviceNameLength * sizeof(WCHAR) < input->DeviceNameOffset)
+        return STATUS_INVALID_PARAMETER;
+
+    RtlInitUnicodeString( &device_nameW, (WCHAR *)(buff + input->DeviceNameOffset) );
+
+    WideCharToMultiByte(CP_UNIXCP, 0, (WCHAR *)(buff + input->SymbolicLinkNameOffset) + 12, 1, &drive, 1, NULL, NULL);
+
+    mount = add_mount_point( device, &device_nameW, (WCHAR *)(buff + input->SymbolicLinkNameOffset) );
+
+    if (!mount)
+        return STATUS_NO_MEMORY;
+
+    FIXME("(device:%s (offset:%hu length:%hu) link:%s (offset:%hu length:%hu) letter:%c)\n",
+        debugstr_w((WCHAR *)(buff + input->DeviceNameOffset)), input->DeviceNameOffset, input->DeviceNameLength,
+        debugstr_w((WCHAR *)(buff + input->SymbolicLinkNameOffset)), input->SymbolicLinkNameOffset, input->SymbolicLinkNameLength,
+        drive[0]);
+
+    drive[0] = tolower(drive[0]);
+    unix_mount = get_device_path(drive);
+    set_mount_point_id( mount, unix_mount, strlen(unix_mount) + 1);
+    HeapFree( GetProcessHeap(), 0, unix_mount );
+
+    return STATUS_SUCCESS;
+}
+
 /* create the DosDevices mount point symlink for a new device */
 struct mount_point *add_dosdev_mount_point( DEVICE_OBJECT *device, UNICODE_STRING *device_name, int drive )
 {
@@ -371,6 +427,17 @@ static NTSTATUS WINAPI mountmgr_ioctl( DEVICE_OBJECT *device, IRP *irp )
 
     switch(irpsp->Parameters.DeviceIoControl.IoControlCode)
     {
+    case IOCTL_MOUNTMGR_CREATE_POINT:
+        if (irpsp->Parameters.DeviceIoControl.InputBufferLength < sizeof(MOUNTMGR_CREATE_POINT_INPUT))
+        {
+            irp->IoStatus.u.Status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        irp->IoStatus.u.Status = create_mount_point( device, irp->AssociatedIrp.SystemBuffer,
+                                                     irpsp->Parameters.DeviceIoControl.InputBufferLength,
+                                                     irpsp->Parameters.DeviceIoControl.OutputBufferLength,
+                                                     &irp->IoStatus );
+        break;
     case IOCTL_MOUNTMGR_QUERY_POINTS:
         if (irpsp->Parameters.DeviceIoControl.InputBufferLength < sizeof(MOUNTMGR_MOUNT_POINT))
         {
